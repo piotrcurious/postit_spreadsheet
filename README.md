@@ -69,3 +69,7 @@ The main application class that handles the creation and management of cells.
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+
+v2 :
+Enhancements:Evaluate Expressions: Added a method evaluateExpression to map cell references and evaluate the expressions, allowing more complex relationships like summing cells in a row.Update Cells: Enhanced the updateCells method to evaluate and update cell values based on the defined expressions.Save and Load: Retained and improved save and load functionality to handle complex expressions.Usage for Complex Relations:To reference another cell in an expression, use the format $cell<ID>. For example, to sum cells with IDs 1, 2, and 3, use the expression "$cell1 + $cell2 + $cell3".With these improvements, the spreadsheet app can handle more complex cell relations, including summing and other arithmetic operations.
