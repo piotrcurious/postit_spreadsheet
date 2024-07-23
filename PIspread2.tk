@@ -1,0 +1,128 @@
+package require Tk
+package require TclOO
+package require json
+
+# Create the main application class
+oo::class create SpreadsheetApp {
+    variable cells
+    variable cellValues
+    constructor {w} {
+        set cells {}
+        set cellValues {}
+        # Create main window
+        toplevel $w
+        wm title $w "Spreadsheet"
+        frame $w.menuFrame
+        pack $w.menuFrame -side top -fill x
+        
+        button $w.menuFrame.add -text "Add Cell" -command [list my addCell $w]
+        button $w.menuFrame.save -text "Save" -command [list my saveSpreadsheet $w]
+        button $w.menuFrame.load -text "Load" -command [list my loadSpreadsheet $w]
+        pack $w.menuFrame.add -side left
+        pack $w.menuFrame.save -side left
+        pack $w.menuFrame.load -side left
+        
+        frame $w.cellsFrame
+        pack $w.cellsFrame -side top -fill both -expand 1
+    }
+
+    method addCell {w {id {}}} {
+        if {$id eq ""} {
+            set id [expr {[llength $cells] + 1}]
+        }
+        set frame [frame $w.cellsFrame.f$id]
+        pack $frame -side top -fill x
+        set label [label $frame.l -text "Cell $id"]
+        set entry [entry $frame.e]
+        pack $label -side left
+        pack $entry -side left -fill x -expand 1
+
+        $entry insert 0 0
+
+        set relBtn [button $frame.r -text "Set Relation" -command [list my setRelation $id $entry]]
+        pack $relBtn -side left
+
+        set cells($id) [list $entry {}]
+
+        if {[info exists cellValues($id)]} {
+            $entry delete 0 end
+            $entry insert 0 $cellValues($id)
+        }
+    }
+
+    method setRelation {id entry} {
+        set target [tk_getOpenFile -title "Select Target Cell" -filetypes {{Cell {}}}]
+        if {[info exists cells($target)]} {
+            set expr [tk_getOpenFile -title "Set Expression" -filetypes {{Text {}}}]
+            if {$expr ne ""} {
+                set result [eval "return [string map {\$$target \$$target} $expr]"]
+                set cells($id) [list $entry $result]
+                $entry delete 0 end
+                $entry insert 0 $result
+            }
+        } else {
+            tk_messageBox -message "Invalid cell selected"
+        }
+    }
+
+    method evaluateExpression {expr} {
+        set mappedExpr $expr
+        foreach id [array names cells] {
+            set entry [lindex $cells($id) 0]
+            set value [$entry get]
+            regsub -all {\$cell$id} $mappedExpr $value mappedExpr
+        }
+        return [expr $mappedExpr]
+    }
+
+    method updateCells {} {
+        foreach id [array names cells] {
+            set entry [lindex $cells($id) 0]
+            set expr [lindex $cells($id) 1]
+            if {$expr ne {}} {
+                set val [my evaluateExpression $expr]
+                $entry delete 0 end
+                $entry insert 0 $val
+                set cellValues($id) $val
+            }
+        }
+    }
+
+    method saveSpreadsheet {w} {
+        set filename [tk_getSaveFile -title "Save Spreadsheet" -filetypes {{JSON {.json}}}]
+        if {$filename ne ""} {
+            set data {}
+            foreach id [array names cells] {
+                lappend data [list $id [lindex $cells($id) 1]]
+            }
+            set json_data [json::json::dict create $data]
+            set f [open $filename w]
+            puts $f $json_data
+            close $f
+        }
+    }
+
+    method loadSpreadsheet {w} {
+        set filename [tk_getOpenFile -title "Load Spreadsheet" -filetypes {{JSON {.json}}}]
+        if ($filename ne "") {
+            set f [open $filename r]
+            set json_data [read $f]
+            close $f
+            set data [json::json::dict get $json_data]
+            foreach {id expr} $data {
+                my addCell $w $id
+                if ($expr ne "") {
+                    set cells($id) [list [lindex $cells($id) 0] $expr]
+                }
+            }
+            my updateCells
+        }
+    }
+}
+
+# Run the application
+SpreadsheetApp create app .app
+app updateCells
+
+# Run the Tk main event loop
+tk::MainLoop
