@@ -1,0 +1,177 @@
+package require Tk
+package require TclOO
+package require json
+package require fileutil
+
+# Create the main application class
+oo::class create SpreadsheetApp {
+    variable cells
+    variable cellValues
+    variable orderOfExecution
+    variable nextRow
+    variable filename
+    variable fileLastModified
+
+    constructor {w} {
+        set cells {}
+        set cellValues {}
+        set orderOfExecution {}
+        set nextRow 0
+        set filename ""
+        set fileLastModified 0
+
+        # Create main window
+        toplevel $w
+        wm title $w "Spreadsheet"
+        frame $w.menuFrame
+        pack $w.menuFrame -side top -fill x
+        
+        button $w.menuFrame.add -text "Add Cell" -command [list my addCell $w]
+        button $w.menuFrame.save -text "Save" -command [list my saveSpreadsheet $w]
+        button $w.menuFrame.load -text "Load" -command [list my loadSpreadsheet $w]
+        button $w.menuFrame.update -text "Update" -command [list my updateCells]
+        pack $w.menuFrame.add -side left
+        pack $w.menuFrame.save -side left
+        pack $w.menuFrame.load -side left
+        pack $w.menuFrame.update -side left
+        
+        frame $w.cellsFrame
+        pack $w.cellsFrame -side top -fill both -expand 1
+        
+        # Start monitoring file changes
+        after 1000 [list my monitorFileChanges]
+    }
+
+    method addCell {w {id {}}} {
+        if {$id eq ""} {
+            set id [expr {[llength $cells] + 1}]
+        }
+        set frame [frame $w.cellsFrame.f$id]
+        grid $frame -row $nextRow -column 0 -sticky "ew"
+        set label [label $frame.l -text "Cell $id"]
+        set entry [entry $frame.e]
+        set delBtn [button $frame.d -text "Delete" -command [list my deleteCell $id]]
+        set relBtn [button $frame.r -text "Set Relation" -command [list my setRelation $id $entry]]
+        
+        grid $label -row 0 -column 0 -sticky "w"
+        grid $entry -row 0 -column 1 -sticky "ew"
+        grid $relBtn -row 0 -column 2 -sticky "e"
+        grid $delBtn -row 0 -column 3 -sticky "e"
+
+        grid columnconfigure $frame 1 -weight 1
+
+        set cells($id) [list $frame $entry {}]
+        lappend orderOfExecution $id
+        incr nextRow
+
+        if {[info exists cellValues($id)]} {
+            $entry delete 0 end
+            $entry insert 0 $cellValues($id)
+        }
+    }
+
+    method deleteCell {id} {
+        set frame [lindex $cells($id) 0]
+        destroy $frame
+        unset cells($id)
+        unset cellValues($id)
+        set orderOfExecution [lsearch -all -inline -not $orderOfExecution $id]
+        set nextRow [expr {$nextRow - 1}]
+        my updateCells
+    }
+
+    method setRelation {id entry} {
+        set target [tk_getOpenFile -title "Select Target Cell" -filetypes {{Cell {}}}]
+        if {[info exists cells($target)]} {
+            set expr [tk_getOpenFile -title "Set Expression" -filetypes {{Text {}}}]
+            if {$expr ne ""} {
+                set cells($id) [list $entry $expr]
+                my updateCells
+            }
+        } else {
+            tk_messageBox -message "Invalid cell selected"
+        }
+    }
+
+    method evaluateExpression {expr} {
+        set mappedExpr $expr
+        foreach id [array names cells] {
+            set entry [lindex $cells($id) 1]
+            if {[string match *cell$id* $mappedExpr]} {
+                set value [$entry get]
+                regsub -all {\$cell$id} $mappedExpr $value mappedExpr
+            }
+        }
+        return [expr $mappedExpr]
+    }
+
+    method updateCells {} {
+        foreach id $orderOfExecution {
+            if {[info exists cells($id)]} {
+                set entry [lindex $cells($id) 1]
+                set expr [lindex $cells($id) 2]
+                if {$expr ne {}} {
+                    set val [my evaluateExpression $expr]
+                    $entry delete 0 end
+                    $entry insert 0 $val
+                    set cellValues($id) $val
+                }
+            }
+        }
+    }
+
+    method saveSpreadsheet {w} {
+        set filename [tk_getSaveFile -title "Save Spreadsheet" -filetypes {{JSON {.json}}}]
+        if {$filename ne ""} {
+            set data [list $orderOfExecution]
+            foreach id [array names cells] {
+                lappend data [list $id [lindex $cells($id) 2]]
+            }
+            set json_data [json::json::dict create $data]
+            set f [open $filename w]
+            puts $f $json_data
+            close $f
+            set fileLastModified [file mtime $filename]
+        }
+    }
+
+    method loadSpreadsheet {w} {
+        set filename [tk_getOpenFile -title "Load Spreadsheet" -filetypes {{JSON {.json}}}]
+        if {$filename ne ""} {
+            set f [open $filename r]
+            fconfigure $f -translation binary
+            fileutil::lock -exclusive $f
+            set json_data [read $f]
+            close $f
+            set data [json::json::dict get $json_data]
+            set orderOfExecution [lindex $data 0]
+            foreach {id expr} [lrange $data 1 end] {
+                my addCell $w $id
+                if {$expr ne {}} {
+                    set cells($id) [list [lindex $cells($id) 0] [lindex $cells($id) 1] $expr]
+                }
+            }
+            my updateCells
+            set fileLastModified [file mtime $filename]
+        }
+    }
+
+    method monitorFileChanges {} {
+        if {$filename ne ""} {
+            set currentMtime [file mtime $filename]
+            if {$currentMtime > $fileLastModified} {
+                puts "File changed, reloading..."
+                my loadSpreadsheet .
+                set fileLastModified $currentMtime
+            }
+        }
+        after 1000 [list my monitorFileChanges]
+    }
+}
+
+# Run the application
+SpreadsheetApp create app .app
+app updateCells
+
+# Run the Tk main event loop
+tk::MainLoop
