@@ -1,0 +1,286 @@
+package require Tk
+package require TclOO
+
+oo::class create SpreadsheetApp {
+    variable cells
+    variable cellValues
+    variable orderOfExecution
+    variable nextRow
+    variable filename
+    variable fileLastModified
+    variable vars
+
+    constructor {w} {
+        array set cells {}
+        array set cellValues {}
+        array set vars {}
+        set orderOfExecution {}
+        set nextRow 0
+        set filename ""
+        set fileLastModified 0
+
+        # Create main window
+        # Check if window exists to allow embedding or standalone
+        if {[winfo exists $w]} {
+            set top $w
+        } else {
+            set top [toplevel $w]
+            wm title $top "Spreadsheet"
+        }
+
+        frame $top.menuFrame
+        pack $top.menuFrame -side top -fill x
+
+        button $top.menuFrame.add -text "Add Cell" -command [list my addCell $top]
+        button $top.menuFrame.save -text "Save" -command [list my saveSpreadsheet $top]
+        button $top.menuFrame.load -text "Load" -command [list my loadSpreadsheet $top]
+        button $top.menuFrame.update -text "Update All" -command [list my updateCells]
+        pack $top.menuFrame.add -side left
+        pack $top.menuFrame.save -side left
+        pack $top.menuFrame.load -side left
+        pack $top.menuFrame.update -side left
+
+        set f [frame $top.cellsFrame]
+        pack $f -side top -fill both -expand 1
+
+        # Start monitoring file changes if filename is set
+        my monitorFileChanges
+    }
+
+    method addCell {w {id {}}} {
+        if {$id eq ""} {
+            set id 1
+            while {[info exists cells($id)]} { incr id }
+        }
+
+        set top [winfo parent $w.cellsFrame]
+        if {$top eq "."} { set top "" }
+        set f $w.cellsFrame
+
+        set rowFrame [frame $f.f$id]
+        grid $rowFrame -row $nextRow -column 0 -sticky "ew"
+        incr nextRow
+
+        label $rowFrame.l -text "Cell $id:" -width 10
+
+        # Use a variable for trace
+        set vars($id) 0
+        entry $rowFrame.e -textvariable [self namespace]::vars($id)
+
+        button $rowFrame.r -text "Relation" -command [list my setRelation $id]
+        button $rowFrame.d -text "Del" -command [list my deleteCell $id]
+
+        grid $rowFrame.l -row 0 -column 0 -sticky "w"
+        grid $rowFrame.e -row 0 -column 1 -sticky "ew"
+        grid $rowFrame.r -row 0 -column 2 -sticky "e"
+        grid $rowFrame.d -row 0 -column 3 -sticky "e"
+
+        grid columnconfigure $rowFrame 1 -weight 1
+
+        # Store: frame, entry, expression
+        set cells($id) [list $rowFrame $rowFrame.e {}]
+        if {[lsearch $orderOfExecution $id] == -1} {
+            lappend orderOfExecution $id
+        }
+
+        # Trace the variable to update dependents
+        trace add variable vars($id) write [list [self] onCellValueChange $id]
+
+        return $id
+    }
+
+    method deleteCell {id} {
+        set rowFrame [lindex $cells($id) 0]
+        destroy $rowFrame
+        unset cells($id)
+        if {[info exists cellValues($id)]} { unset cellValues($id) }
+
+        # Remove trace and unset var to prevent leaks
+        if {[info exists vars($id)]} {
+            trace remove variable vars($id) write [list [self] onCellValueChange $id]
+            unset vars($id)
+        }
+
+        set idx [lsearch $orderOfExecution $id]
+        if {$idx != -1} {
+            set orderOfExecution [lreplace $orderOfExecution $idx $idx]
+        }
+        # Note: We don't decrement nextRow because it's just for grid placement
+    }
+
+    method setRelation {id} {
+        set win .relDialog$id
+        if {[winfo exists $win]} { destroy $win }
+        toplevel $win
+        wm title $win "Set Relation for Cell $id"
+
+        label $win.msg -text "Enter expression for Cell $id\nUse \$cell<ID> for references (e.g. \$cell1 + 5)"
+        entry $win.e -width 40
+        set expr [lindex $cells($id) 2]
+        $win.e insert 0 $expr
+
+        frame $win.buttons
+        button $win.buttons.ok -text "OK" -command [list my applyRelation $id [$win.e get] $win]
+        button $win.buttons.cancel -text "Cancel" -command [list destroy $win]
+
+        pack $win.msg -pady 5 -padx 5
+        pack $win.e -pady 5 -padx 5
+        pack $win.buttons -pady 5
+        pack $win.buttons.ok $win.buttons.cancel -side left -padx 5
+    }
+
+    method applyRelation {id expr win} {
+        set entry [lindex $cells($id) 1]
+        set cells($id) [list [lindex $cells($id) 0] $entry $expr]
+        destroy $win
+        my updateCells
+    }
+
+    method evaluateExpression {expr} {
+        set mappedExpr $expr
+        # Sort IDs decreasing to handle $cell10 vs $cell1
+        foreach id [lsort -integer -decreasing [array names cells]] {
+            if {[string first "\$cell$id" $mappedExpr] != -1} {
+                set val $vars($id)
+                if {![string is double -strict $val]} { set val 0 }
+                # Replace with word boundary check
+                set pattern [string map {$ \\$} "\$cell$id"]
+                regsub -all "$pattern\\y" $mappedExpr $val mappedExpr
+            }
+        }
+
+        # Support basic functions
+        set mappedExpr [my handleFunctions $mappedExpr]
+
+        if {[catch {expr $mappedExpr} result]} {
+            return "ERR"
+        }
+        return $result
+    }
+
+    method handleFunctions {expr} {
+        # SUM(1, 2, 3)
+        while {[regexp {SUM\(([^)]+)\)} $expr -> args]} {
+            set sum 0
+            foreach arg [split $args ","] {
+                set arg [string trim $arg]
+                if {[string is double -strict $arg]} {
+                    set sum [expr {$sum + $arg}]
+                }
+            }
+            regsub {SUM\([^)]+\)} $expr $sum expr
+        }
+        # AVERAGE(1, 2, 3)
+        while {[regexp {AVERAGE\(([^)]+)\)} $expr -> args]} {
+            set sum 0
+            set count 0
+            foreach arg [split $args ","] {
+                set arg [string trim $arg]
+                if {[string is double -strict $arg]} {
+                    set sum [expr {$sum + $arg}]
+                    incr count
+                }
+            }
+            set avg 0
+            if {$count > 0} { set avg [expr {double($sum) / $count}] }
+            regsub {AVERAGE\([^)]+\)} $expr $avg expr
+        }
+        return $expr
+    }
+
+    method updateCells {} {
+        # Iterate until stable to handle multi-level dependencies
+        set changed 1
+        set maxPasses 10
+        while {$changed && $maxPasses > 0} {
+            set changed 0
+            incr maxPasses -1
+            foreach id $orderOfExecution {
+                if {[info exists cells($id)]} {
+                    set expr [lindex $cells($id) 2]
+                    if {$expr ne ""} {
+                        set oldVal $vars($id)
+                        set val [my evaluateExpression $expr]
+                        if {$val ne $oldVal} {
+                            # Disable trace during update to prevent recursion
+                            trace remove variable vars($id) write [list [self] onCellValueChange $id]
+                            set vars($id) $val
+                            trace add variable vars($id) write [list [self] onCellValueChange $id]
+                            set changed 1
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    method onCellValueChange {id args} {
+        # When a cell changes, we need to update everything that might depend on it.
+        # Simplest is to update all cells in order.
+        my updateCells
+    }
+
+    method saveSpreadsheet {w} {
+        set file [tk_getSaveFile -title "Save Spreadsheet" -filetypes {{JSON {.json}} {All {*}}}]
+        if {$file ne ""} {
+            set data {}
+            lappend data "order" $orderOfExecution
+            foreach id [array names cells] {
+                lappend data "cell_$id" [lindex $cells($id) 2]
+                lappend data "val_$id" $vars($id)
+            }
+
+            # Simple list format since we don't have json package
+            set f [open $file w]
+            puts $f $data
+            close $f
+            set filename $file
+            set fileLastModified [file mtime $file]
+        }
+    }
+
+    method loadSpreadsheet {w} {
+        set file [tk_getOpenFile -title "Load Spreadsheet" -filetypes {{JSON {.json}} {All {*}}}]
+        if {$file ne ""} {
+            set f [open $file r]
+            set data [read $f]
+            close $f
+
+            # Clear existing
+            foreach id [array names cells] { my deleteCell $id }
+            set orderOfExecution {}
+            set nextRow 0
+
+            array set loaded $data
+            set orderOfExecution $loaded(order)
+            foreach id $orderOfExecution {
+                my addCell $w $id
+                set cells($id) [list [lindex $cells($id) 0] [lindex $cells($id) 1] $loaded(cell_$id)]
+                set vars($id) $loaded(val_$id)
+            }
+            my updateCells
+            set filename $file
+            set fileLastModified [file mtime $file]
+        }
+    }
+
+    method monitorFileChanges {} {
+        if {$filename ne ""} {
+            if {[file exists $filename]} {
+                set mtime [file mtime $filename]
+                if {$mtime > $fileLastModified} {
+                    # In a real app, maybe prompt. For now, just reload.
+                    # my loadSpreadsheet .
+                    # Actually, auto-reloading might be annoying if it overwrites unsaved work.
+                    # PIspread4.tk had it though.
+                    set fileLastModified $mtime
+                }
+            }
+        }
+        after 2000 [list my monitorFileChanges]
+    }
+}
+
+if {[info script] eq $argv0} {
+    SpreadsheetApp create app .
+}
